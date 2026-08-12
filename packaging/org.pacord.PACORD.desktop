@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=PACORD
+GenericName=Colaboração remota consentida
+Comment=Salas colaborativas por ZeroTier para Linux
+Exec=pacord
+Icon=network-workgroup
+Terminal=false
+Categories=Network;RemoteAccess;Qt;
+Keywords=PACORD;ZeroTier;collaboration;remote;KDE;
+StartupNotify=true
+StartupWMClass=PACORD
