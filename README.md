@@ -343,3 +343,12 @@ python3 tools/build_icons.py
 ```
 
 O desenho mantém a identidade preto e branco do aplicativo e não contém texto incorporado, para permanecer reconhecível em tamanhos pequenos e não depender de uma fonte específica do sistema.
+
+
+## Tipografia Montserrat
+
+A interface nativa do PACORD usa **Montserrat** como família tipográfica padrão em textos proporcionais e monoespaçados do egui. A fonte é incorporada ao binário por `include_bytes!`, portanto a aparência não depende da instalação de fontes do sistema nem varia entre Debian e Arch Linux.
+
+O arquivo `assets/fonts/Montserrat-Variable.ttf` contém a família variável distribuída pelo projeto Google Fonts, e a licença correspondente está preservada em `assets/fonts/OFL.txt`. A configuração é aplicada antes da criação da janela principal, mantendo a mesma tipografia nos painéis de sala, permissões, ZeroTier, personalização e estados da sessão.
+
+A fonte está sob a [SIL Open Font License 1.1](https://scripts.sil.org/OFL), conforme o arquivo de licença incluído no repositório. A aplicação continua usando sua identidade visual estritamente preta e branca; Montserrat altera apenas a forma tipográfica, sem adicionar cores à interface.

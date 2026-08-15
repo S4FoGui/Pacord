@@ -5,6 +5,21 @@ use pacord::session::SessionController;
 use pacord::zerotier::{ZeroTierClient, ZeroTierSnapshot};
 use std::time::{Duration, Instant};
 
+fn configure_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "montserrat".into(),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/Montserrat-Variable.ttf"))
+            .into(),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        if let Some(entries) = fonts.families.get_mut(&family) {
+            entries.insert(0, "montserrat".into());
+        }
+    }
+    ctx.set_fonts(fonts);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Panel {
     Overview,
@@ -579,6 +594,9 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "PACORD — salas colaborativas",
         options,
-        Box::new(|_cc| Ok(Box::new(PacordApp::default()))),
+        Box::new(|cc| {
+            configure_fonts(&cc.egui_ctx);
+            Ok(Box::new(PacordApp::default()))
+        }),
     )
 }
