@@ -258,3 +258,67 @@ O Módulo 4 gerencia o ciclo de vida dos processos filhos: iniciar host ou viewe
 A sala é local ao processo e o convite é descentralizado; não há servidor de presença, diretório global ou sincronização de estado entre múltiplos hosts. O cadastro de participante na UI representa a aprovação local; a autenticação efetiva do stream continua sendo o desafio HMAC do transporte. O gerenciamento de autorização no controlador ZeroTier permanece fora do PACORD e deve ser feito pelo administrador da rede quando o status indicar `ACCESS_DENIED`.
 
 O arquivo `module4_research.md` registra as fontes e decisões de arquitetura. As referências principais são o [guia oficial do CLI ZeroTier](https://docs.zerotier.com/cli/), o [guia de desenvolvimento do Plasma](https://community.kde.org/Plasma/DeveloperGuide), a [documentação de desenvolvimento KDE](https://develop.kde.org/docs/) e a [referência de janelas winit](https://docs.rs/winit/latest/winit/window/struct.Window.html).
+
+
+## Módulo 5 — canal de voz e transmissão de tela
+
+O Módulo 5 adiciona um canal de voz bidirecional à sessão autenticada. O PACORD captura o microfone padrão por meio de `cpal`/ALSA, converte as amostras para PCM `i16` e transporta pacotes pequenos pelo mesmo canal TCP autenticado do ZeroTier. O viewer reproduz as vozes remotas no dispositivo de saída padrão, sem reproduzir o próprio áudio recebido, evitando eco local básico. O host mantém a reprodução das vozes remotas e também pode participar do canal.
+
+A voz é uma permissão independente. No painel do host, cada participante aprovado possui agora a opção **voz**, além de teclado, mouse e controle `[PAD]`. A permissão é gravada no arquivo de admissão privado da sala e é enviada ao cliente somente depois do handshake HMAC e da validação do nickname e do endereço. Pacotes inválidos, com origem falsificada ou enviados por participante sem a autorização de voz são descartados e recebem uma resposta explícita de rejeição.
+
+A transmissão de tela passa a ser exposta diretamente no viewer com o controle **Receber tela**. O host continua usando PipeWire/xdg-desktop-portal no KDE Plasma Wayland e XShm no X11; cada frame é codificado em JPEG, autenticado pelo transporte existente e apresentado na janela remota. O viewer permite pausar a apresentação local sem encerrar a sessão ou revogar as demais permissões.
+
+Na barra superior do viewer existem os controles **Falar no canal**, **Receber tela** e **Enviar entrada**. O primeiro controla o envio do microfone local; o segundo controla apenas a apresentação dos frames; o terceiro preserva o mecanismo de entrada remota aprovado pelo host. O estado de microfone, saída de áudio e permissão anunciada é mostrado textualmente na mesma interface preto e branco.
+
+### Dependências de áudio
+
+No Debian/Ubuntu, instale os headers ALSA junto às dependências anteriores:
+
+```bash
+sudo apt install -y libasound2-dev
+```
+
+No Arch Linux, instale o equivalente:
+
+```bash
+sudo pacman -S --needed alsa-lib
+```
+
+A execução continua exigindo uma sessão gráfica local, um dispositivo de áudio padrão configurado e, no Wayland, a confirmação do diálogo de captura de tela do portal. A ausência de microfone ou saída de áudio não encerra a sessão: o PACORD registra a indisponibilidade e mantém o fluxo de tela e entrada funcionando.
+
+### Uso resumido
+
+Depois de criar a sala host, adicione o participante pelo nickname e pelo endereço ZeroTier, aprove-o e marque **voz**. Inicie o host pelo painel, compartilhe o convite e faça o cliente entrar na sala. No viewer, habilite **Falar no canal** quando quiser transmitir o microfone e mantenha **Receber tela** habilitado para visualizar o desktop remoto.
+
+O transporte continua usando o desafio HMAC-SHA-256, o limite de oito clientes e o arquivo de admissão privado. O áudio não é um canal público nem um serviço de presença: só circula dentro da sessão PACORD autenticada e aprovada pelo host.
+
+### Estado de validação do Módulo 5
+
+A implementação foi formatada com `cargo fmt`, compilada com `cargo check` e validada pela suíte de testes. A cobertura inclui validação de pacotes de voz malformados, autenticação, política de entrada, salas e sincronização do arquivo de admissão.
+
+| Verificação | Resultado |
+|---|---|
+| Compilação Rust | Aprovada |
+| Testes automatizados | 14 aprovados, 0 falhas |
+| Formatação | Aprovada |
+| Tela remota | PipeWire/XShm → JPEG → viewer egui |
+| Voz | cpal/ALSA → PCM autenticado → reprodução remota |
+| Controle do host | Permissão de voz independente por participante |
+
+> O áudio usa PCM não comprimido nesta primeira implementação para reduzir dependências e manter o caminho de depuração transparente. Em redes ZeroTier com muitos participantes, uma etapa futura pode substituir os pacotes PCM por Opus e separar voz e vídeo em fluxos UDP com controle de jitter.
+
+> O PACORD continua sendo um protótipo de colaboração consentida. O host deve revisar as permissões de cada participante e manter o segredo da sala fora de canais públicos.
+
+## Referências adicionais do Módulo 5
+
+[10] [cpal — cross-platform audio I/O for Rust](https://docs.rs/cpal/latest/cpal/)
+
+[11] [ALSA — Advanced Linux Sound Architecture](https://www.alsa-project.org/wiki/Main_Page)
+
+[12] [Rust Tokio — asynchronous runtime](https://docs.rs/tokio/latest/tokio/)
+
+[13] [XDG Desktop Portal — ScreenCast](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html)
+
+[14] [PipeWire — official documentation](https://docs.pipewire.org/)
+
+[15] [ZeroTier — official documentation](https://docs.zerotier.com/)

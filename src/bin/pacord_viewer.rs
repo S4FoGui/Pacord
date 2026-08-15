@@ -1,12 +1,15 @@
 use eframe::egui;
 use gilrs::{Axis, Button, EventType, Gilrs};
+use pacord::audio::{VoicePacket, VoiceRuntime};
 use pacord::input::{GamepadAxis, InputEventPacket, InputPermissions};
 use pacord::transport::{
     connect_input_client, InputClientHandle, InputOverlayPacket, ServerEvent, TransportError,
 };
 use std::env;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 use std::thread;
 
 #[derive(Debug)]
@@ -25,6 +28,11 @@ struct ViewerApp {
     status: String,
     last_sequence: u64,
     control_enabled: bool,
+    screen_enabled: bool,
+    voice_enabled: bool,
+    voice_enabled_shared: Arc<AtomicBool>,
+    voice_runtime: Option<VoiceRuntime>,
+    voice_status: String,
     gilrs: Option<Gilrs>,
 }
 
@@ -39,6 +47,11 @@ impl ViewerApp {
             status: "Aguardando autorização do host…".to_string(),
             last_sequence: 0,
             control_enabled: false,
+            screen_enabled: true,
+            voice_enabled: true,
+            voice_enabled_shared: Arc::new(AtomicBool::new(true)),
+            voice_runtime: None,
+            voice_status: "Canal de voz aguardando conexão".into(),
             gilrs: Gilrs::new().ok(),
         }
     }
@@ -58,10 +71,36 @@ impl ViewerApp {
         while let Ok(message) = self.messages.try_recv() {
             match message {
                 ViewerMessage::Connected(handle) => {
+                    let voice_handle = handle.clone();
+                    let voice_enabled = self.voice_enabled_shared.clone();
+                    let voice_runtime = VoiceRuntime::start_best_effort(
+                        handle.client_id(),
+                        Arc::new(move |packet: VoicePacket| {
+                            if voice_enabled.load(Ordering::Relaxed) {
+                                if let Err(error) = voice_handle.try_send_voice(packet) {
+                                    log::debug!("voz local não enviada: {error}");
+                                }
+                            }
+                        }),
+                    );
+                    self.voice_status = format!(
+                        "Voz: microfone={}, saída={}",
+                        if voice_runtime.has_input() {
+                            "ativa"
+                        } else {
+                            "indisponível"
+                        },
+                        if voice_runtime.has_output() {
+                            "ativa"
+                        } else {
+                            "indisponível"
+                        },
+                    );
+                    self.voice_runtime = Some(voice_runtime);
                     self.input_handle = Some(handle);
                     self.status = "Conectado; aguardando permissões do host".into();
                 }
-                ViewerMessage::Event(Ok(ServerEvent::Frame(packet))) => {
+                ViewerMessage::Event(Ok(ServerEvent::Frame(packet))) if self.screen_enabled => {
                     match image::load_from_memory(&packet.jpeg) {
                         Ok(image) => {
                             let rgba = image.to_rgba8();
@@ -82,11 +121,31 @@ impl ViewerApp {
                         Err(error) => self.status = format!("Frame inválido: {error}"),
                     }
                 }
+                ViewerMessage::Event(Ok(ServerEvent::Voice(packet))) => {
+                    let own_client_id =
+                        self.input_handle.as_ref().map(InputClientHandle::client_id);
+                    if own_client_id != Some(packet.source_client_id) {
+                        if let Some(runtime) = &self.voice_runtime {
+                            runtime.push(&packet);
+                        }
+                    }
+                }
+                ViewerMessage::Event(Ok(ServerEvent::VoiceRejected(reason))) => {
+                    self.voice_status = format!("Voz rejeitada: {reason}");
+                }
+                ViewerMessage::Event(Ok(ServerEvent::Frame(_))) => {}
                 ViewerMessage::Event(Ok(ServerEvent::InputPolicy(permissions))) => {
                     self.permissions = permissions;
+                    if !permissions.voice {
+                        self.voice_enabled = false;
+                        self.voice_enabled_shared.store(false, Ordering::Relaxed);
+                    }
                     self.status = format!(
-                        "Permissões: teclado={}, mouse={}, controle={}",
-                        permissions.keyboard, permissions.pointer, permissions.controller
+                        "Permissões: teclado={}, mouse={}, controle={}, voz={}",
+                        permissions.keyboard,
+                        permissions.pointer,
+                        permissions.controller,
+                        permissions.voice
                     );
                 }
                 ViewerMessage::Event(Ok(ServerEvent::Overlays(overlays))) => {
@@ -226,11 +285,26 @@ impl eframe::App for ViewerApp {
                 ui.label(&self.status);
                 ui.separator();
                 ui.checkbox(&mut self.control_enabled, "Enviar entrada");
+                ui.checkbox(&mut self.screen_enabled, "Receber tela");
+                let voice_changed = ui
+                    .add_enabled(
+                        self.permissions.voice,
+                        egui::Checkbox::new(&mut self.voice_enabled, "Falar no canal"),
+                    )
+                    .changed();
+                if voice_changed {
+                    self.voice_enabled_shared
+                        .store(self.voice_enabled, Ordering::Relaxed);
+                }
+                ui.label(&self.voice_status);
                 if !self.permissions.keyboard
                     && !self.permissions.pointer
                     && !self.permissions.controller
                 {
                     ui.label("Host não concedeu entrada");
+                }
+                if !self.permissions.voice {
+                    ui.label("Host não concedeu voz");
                 }
             });
         });

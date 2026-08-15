@@ -1,3 +1,4 @@
+use crate::audio::VoicePacket;
 use crate::input::{InputEventPacket, InputManager, InputOverlay, InputPermissions};
 use crate::rooms::RoomAdmission;
 use hmac::{Hmac, Mac};
@@ -60,6 +61,7 @@ enum ClientMessage {
         proof: [u8; 32],
     },
     Input(InputEventPacket),
+    Voice(VoicePacket),
     Stop,
 }
 
@@ -85,7 +87,11 @@ enum ServerMessage {
     InputRejected {
         reason: String,
     },
+    VoiceRejected {
+        reason: String,
+    },
     Frame(FramePacket),
+    Voice(VoicePacket),
     Stopped,
 }
 
@@ -170,6 +176,7 @@ pub struct FrameServer {
     clients: Arc<AtomicUsize>,
     input_manager: Arc<InputManager>,
     overlays: broadcast::Sender<Vec<InputOverlayPacket>>,
+    voice: broadcast::Sender<VoicePacket>,
     admission_file: Option<PathBuf>,
 }
 
@@ -181,12 +188,14 @@ impl FrameServer {
             ));
         }
         let (overlays, _) = broadcast::channel(8);
+        let (voice, _) = broadcast::channel(64);
         Ok(Self {
             bind_addr,
             secret: Arc::new(secret),
             clients: Arc::new(AtomicUsize::new(0)),
             input_manager: Arc::new(InputManager::new(InputPermissions::none())),
             overlays,
+            voice,
             admission_file: std::env::var_os("PACORD_ADMISSION_FILE").map(PathBuf::from),
         })
     }
@@ -203,6 +212,10 @@ impl FrameServer {
     pub fn with_admission_file(mut self, path: Option<PathBuf>) -> Self {
         self.admission_file = path;
         self
+    }
+
+    pub fn voice_sender(&self) -> broadcast::Sender<VoicePacket> {
+        self.voice.clone()
     }
 
     pub async fn run(&self, frames: broadcast::Sender<FramePacket>) -> Result<(), TransportError> {
@@ -233,6 +246,7 @@ impl FrameServer {
             let frames = frames.clone();
             let input_manager = self.input_manager.clone();
             let overlays = self.overlays.clone();
+            let voice = self.voice.clone();
             let admission_file = self.admission_file.clone();
             tokio::spawn(async move {
                 let result = handle_client(
@@ -242,6 +256,7 @@ impl FrameServer {
                     frames,
                     input_manager,
                     overlays,
+                    voice,
                     admission_file,
                 )
                 .await;
@@ -271,6 +286,7 @@ async fn handle_client(
     frames: broadcast::Sender<FramePacket>,
     input_manager: Arc<InputManager>,
     overlays: broadcast::Sender<Vec<InputOverlayPacket>>,
+    voice: broadcast::Sender<VoicePacket>,
     admission_file: Option<PathBuf>,
 ) -> Result<(), TransportError> {
     let mut nonce = [0u8; CHALLENGE_BYTES];
@@ -299,16 +315,20 @@ async fn handle_client(
         return Err(TransportError::Authentication);
     }
 
-    if let Some(path) = admission_file {
-        let admission = load_admission(&path)?;
-        if !admission.allows(&nickname, peer) {
+    let mut client_permissions = if let Some(path) = admission_file.as_ref() {
+        let admission = load_admission(path)?;
+        let Some(permissions) = admission.permissions_for(&nickname, peer) else {
             let _ =
                 reject_connection(stream, "participante ainda não foi aprovado pelo host").await;
             return Err(TransportError::Rejected("participante não aprovado".into()));
-        }
-    }
+        };
+        permissions
+    } else {
+        input_manager.permissions()
+    };
 
-    let client_id = input_manager.register(nickname);
+    let client_nickname = nickname.clone();
+    let client_id = input_manager.register_with_permissions(nickname, client_permissions);
     write_message(
         &mut stream,
         &ServerMessage::Accepted {
@@ -320,7 +340,7 @@ async fn handle_client(
     write_message(
         &mut stream,
         &ServerMessage::InputPolicy {
-            permissions: input_manager.permissions(),
+            permissions: client_permissions,
         },
     )
     .await?;
@@ -338,7 +358,18 @@ async fn handle_client(
 
     let mut frame_receiver = frames.subscribe();
     let mut overlay_receiver = overlays.subscribe();
+    let mut voice_receiver = voice.subscribe();
     loop {
+        if let Some(path) = admission_file.as_ref() {
+            let updated_permissions = load_admission(path)
+                .ok()
+                .and_then(|admission| admission.permissions_for(&client_nickname, peer))
+                .unwrap_or_else(InputPermissions::none);
+            if updated_permissions != client_permissions {
+                client_permissions = updated_permissions;
+                let _ = input_manager.set_client_permissions(client_id, client_permissions);
+            }
+        }
         tokio::select! {
             frame = frame_receiver.recv() => {
                 match frame {
@@ -358,6 +389,13 @@ async fn handle_client(
                     Err(broadcast::error::RecvError::Closed) => continue,
                 }
             }
+            voice_packet = voice_receiver.recv() => {
+                match voice_packet {
+                    Ok(packet) => write_message(&mut stream, &ServerMessage::Voice(packet)).await?,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => continue,
+                }
+            }
             message = read_message::<_, ClientMessage>(&mut stream) => {
                 match message? {
                     ClientMessage::Input(event) => {
@@ -368,6 +406,17 @@ async fn handle_client(
                                 write_message(&mut stream, &ServerMessage::InputAccepted).await?;
                             }
                             Err(error) => write_message(&mut stream, &ServerMessage::InputRejected { reason: error.to_string() }).await?,
+                        }
+                    }
+                    ClientMessage::Voice(packet) => {
+                        if !packet.is_valid() {
+                            write_message(&mut stream, &ServerMessage::VoiceRejected { reason: "pacote de voz inválido".into() }).await?;
+                        } else if !client_permissions.voice {
+                            write_message(&mut stream, &ServerMessage::VoiceRejected { reason: "voz desabilitada pelo host".into() }).await?;
+                        } else if packet.source_client_id != client_id {
+                            write_message(&mut stream, &ServerMessage::VoiceRejected { reason: "origem de voz inválida".into() }).await?;
+                        } else {
+                            let _ = voice.send(packet);
                         }
                     }
                     ClientMessage::Stop => {
@@ -401,15 +450,22 @@ pub enum ServerEvent {
     Overlays(Vec<InputOverlayPacket>),
     InputAccepted,
     InputRejected(String),
+    Voice(VoicePacket),
+    VoiceRejected(String),
     Stopped,
 }
 
 #[derive(Debug, Clone)]
 pub struct InputClientHandle {
     outgoing: mpsc::Sender<ClientMessage>,
+    client_id: usize,
 }
 
 impl InputClientHandle {
+    pub fn client_id(&self) -> usize {
+        self.client_id
+    }
+
     pub fn try_send_input(&self, event: InputEventPacket) -> Result<(), TransportError> {
         self.outgoing
             .try_send(ClientMessage::Input(event))
@@ -425,6 +481,19 @@ impl InputClientHandle {
             .map_err(|_| TransportError::Protocol("canal de entrada encerrado".into()))
     }
 
+    pub fn try_send_voice(&self, packet: VoicePacket) -> Result<(), TransportError> {
+        self.outgoing
+            .try_send(ClientMessage::Voice(packet))
+            .map_err(|error| TransportError::Protocol(format!("fila de voz indisponível: {error}")))
+    }
+
+    pub async fn send_voice(&self, packet: VoicePacket) -> Result<(), TransportError> {
+        self.outgoing
+            .send(ClientMessage::Voice(packet))
+            .await
+            .map_err(|_| TransportError::Protocol("canal de voz encerrado".into()))
+    }
+
     pub async fn stop(&self) -> Result<(), TransportError> {
         self.outgoing
             .send(ClientMessage::Stop)
@@ -437,7 +506,7 @@ async fn handshake(
     server: SocketAddr,
     nickname: String,
     secret: Vec<u8>,
-) -> Result<TcpStream, TransportError> {
+) -> Result<(TcpStream, usize), TransportError> {
     if secret.len() < 16 {
         return Err(TransportError::Protocol(
             "o segredo do PACORD deve ter pelo menos 16 bytes".into(),
@@ -463,7 +532,7 @@ async fn handshake(
     )
     .await?;
     match read_message::<_, ServerMessage>(&mut stream).await? {
-        ServerMessage::Accepted { .. } => Ok(stream),
+        ServerMessage::Accepted { client_id, .. } => Ok((stream, client_id)),
         ServerMessage::Rejected { reason } => Err(TransportError::Rejected(reason)),
         _ => Err(TransportError::Protocol(
             "resposta de aceitação inválida".into(),
@@ -482,7 +551,7 @@ pub async fn connect_input_client(
     ),
     TransportError,
 > {
-    let stream = handshake(server, nickname, secret).await?;
+    let (stream, client_id) = handshake(server, nickname, secret).await?;
     let (mut reader, mut writer) = stream.into_split();
     let (outgoing, mut outgoing_receiver) = mpsc::channel::<ClientMessage>(64);
     let (events_sender, events_receiver) = mpsc::channel::<Result<ServerEvent, TransportError>>(16);
@@ -543,6 +612,24 @@ pub async fn connect_input_client(
                         break;
                     }
                 }
+                Ok(ServerMessage::Voice(packet)) => {
+                    if events_for_reader
+                        .send(Ok(ServerEvent::Voice(packet)))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(ServerMessage::VoiceRejected { reason }) => {
+                    if events_for_reader
+                        .send(Ok(ServerEvent::VoiceRejected(reason)))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
                 Ok(ServerMessage::Stopped) => {
                     let _ = events_for_reader.send(Ok(ServerEvent::Stopped)).await;
                     break;
@@ -564,7 +651,13 @@ pub async fn connect_input_client(
             }
         }
     });
-    Ok((InputClientHandle { outgoing }, events_receiver))
+    Ok((
+        InputClientHandle {
+            outgoing,
+            client_id,
+        },
+        events_receiver,
+    ))
 }
 
 pub async fn connect_client(
@@ -589,7 +682,9 @@ pub async fn connect_client(
                 Ok(
                     ServerEvent::InputPolicy(_)
                     | ServerEvent::Overlays(_)
-                    | ServerEvent::InputAccepted,
+                    | ServerEvent::InputAccepted
+                    | ServerEvent::Voice(_)
+                    | ServerEvent::VoiceRejected(_),
                 ) => {}
                 Err(error) => {
                     let _ = sender.send(Err(error)).await;
@@ -606,6 +701,7 @@ mod tests {
     use super::{
         connect_input_client, proof, FramePacket, FrameServer, ServerEvent, PROTOCOL_VERSION,
     };
+    use crate::audio::VoicePacket;
     use crate::input::{InputEventPacket, InputManager, InputPermissions};
     use std::sync::Arc;
 
@@ -674,6 +770,49 @@ mod tests {
             }
         }
         assert!(saw_frame);
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn authenticated_client_can_send_voice_when_allowed() {
+        let secret = b"pacord-test-secret-1234".to_vec();
+        let input = Arc::new(InputManager::new(InputPermissions::all()));
+        let server = FrameServer::new("127.0.0.1:0".parse().unwrap(), secret.clone())
+            .unwrap()
+            .with_input_manager(input);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (frames, _) = tokio::sync::broadcast::channel(2);
+        let server_task = tokio::spawn({
+            let server = server.clone();
+            async move { server.run_on_listener(listener, frames).await }
+        });
+        let (handle, mut events) = connect_input_client(address, "alice".into(), secret)
+            .await
+            .unwrap();
+        handle
+            .try_send_voice(VoicePacket {
+                sequence: 9,
+                source_client_id: handle.client_id(),
+                sample_rate: 48_000,
+                channels: 1,
+                samples: vec![0; 960],
+            })
+            .unwrap();
+        let mut saw_voice = false;
+        for _ in 0..8 {
+            if let Some(Ok(ServerEvent::Voice(packet))) =
+                tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+                    .await
+                    .unwrap()
+            {
+                assert_eq!(packet.sequence, 9);
+                assert_eq!(packet.source_client_id, handle.client_id());
+                saw_voice = true;
+                break;
+            }
+        }
+        assert!(saw_voice);
         server_task.abort();
     }
 

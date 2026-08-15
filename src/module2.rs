@@ -1,3 +1,4 @@
+use crate::audio::VoiceRuntime;
 use crate::capture::{CaptureConfig, CapturedFrame, FrameSource, XShmCapture};
 use crate::input::InputManager;
 use crate::transport::{FramePacket, FrameServer};
@@ -53,6 +54,23 @@ pub async fn run_x11_host(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let (frames, _) = broadcast::channel::<FramePacket>(2);
     let server = FrameServer::new(bind_addr, secret)?.with_input_manager(input_manager);
+    let voice_sender = server.voice_sender();
+    let voice_receiver = voice_sender.subscribe();
+    let voice_runtime = VoiceRuntime::start_best_effort(
+        0,
+        Arc::new(move |packet| {
+            let _ = voice_sender.send(packet);
+        }),
+    );
+    let voice_task = tokio::spawn(async move {
+        let runtime = voice_runtime;
+        let mut receiver = voice_receiver;
+        while let Ok(packet) = receiver.recv().await {
+            if packet.source_client_id != 0 {
+                runtime.push(&packet);
+            }
+        }
+    });
     let server_frames = frames.clone();
     let server_task = tokio::spawn(async move { server.run(server_frames).await });
 
@@ -75,6 +93,7 @@ pub async fn run_x11_host(
     tokio::select! {
         result = server_task => { result??; }
         result = capture_task => { result??; }
+        _ = voice_task => {}
     }
     Ok(())
 }
@@ -87,6 +106,23 @@ pub async fn run_wayland_host(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let (frames, _) = broadcast::channel::<FramePacket>(2);
     let server = FrameServer::new(bind_addr, secret)?.with_input_manager(input_manager);
+    let voice_sender = server.voice_sender();
+    let voice_receiver = voice_sender.subscribe();
+    let voice_runtime = VoiceRuntime::start_best_effort(
+        0,
+        Arc::new(move |packet| {
+            let _ = voice_sender.send(packet);
+        }),
+    );
+    let voice_task = tokio::spawn(async move {
+        let runtime = voice_runtime;
+        let mut receiver = voice_receiver;
+        while let Ok(packet) = receiver.recv().await {
+            if packet.source_client_id != 0 {
+                runtime.push(&packet);
+            }
+        }
+    });
     let server_frames = frames.clone();
     let server_task = tokio::spawn(async move { server.run(server_frames).await });
 
@@ -108,6 +144,7 @@ pub async fn run_wayland_host(
         result = server_task => { result??; }
         result = portal_task => { result??; }
         result = publish_task => { result?; }
+        _ = voice_task => {}
     }
     Ok(())
 }

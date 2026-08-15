@@ -441,6 +441,7 @@ impl PacordApp {
                     ui.checkbox(&mut permissions.keyboard, "teclado");
                     ui.checkbox(&mut permissions.pointer, "mouse");
                     ui.checkbox(&mut permissions.controller, "controle [PAD]");
+                    ui.checkbox(&mut permissions.voice, "voz");
                 });
             });
             if permissions != participant.permissions {
@@ -529,6 +530,16 @@ fn nav_button(ui: &mut egui::Ui, current: &mut Panel, target: Panel, label: &str
 impl eframe::App for PacordApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.session_controller.poll();
+        let is_host_room = self
+            .room_manager
+            .current()
+            .map(|room| room.mode == RoomMode::Host)
+            .unwrap_or(false);
+        if is_host_room {
+            if let Err(error) = self.room_manager.sync_admission_file() {
+                self.status = error.to_string();
+            }
+        }
         if self
             .last_zerotier_probe
             .map(|time| time.elapsed() > Duration::from_secs(60))

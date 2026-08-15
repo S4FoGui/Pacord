@@ -12,6 +12,7 @@ pub struct InputPermissions {
     pub keyboard: bool,
     pub pointer: bool,
     pub controller: bool,
+    pub voice: bool,
 }
 
 impl InputPermissions {
@@ -20,6 +21,7 @@ impl InputPermissions {
             keyboard: false,
             pointer: false,
             controller: false,
+            voice: false,
         }
     }
 
@@ -28,6 +30,7 @@ impl InputPermissions {
             keyboard: true,
             pointer: true,
             controller: true,
+            voice: true,
         }
     }
 }
@@ -98,6 +101,7 @@ impl std::error::Error for InputError {}
 struct InputSession {
     client_id: usize,
     nickname: String,
+    permissions: InputPermissions,
     devices: Option<ClientVirtualDevices>,
     x: f32,
     y: f32,
@@ -127,18 +131,37 @@ impl InputManager {
 
     pub fn set_permissions(&self, permissions: InputPermissions) {
         *self.permissions.lock().expect("permissões PACORD") = permissions;
-        if !permissions.keyboard || !permissions.pointer || !permissions.controller {
-            if let Ok(mut sessions) = self.sessions.lock() {
-                for session in sessions.values_mut() {
-                    if !permissions.controller {
-                        session.controller_active = false;
-                    }
+        if let Ok(mut sessions) = self.sessions.lock() {
+            for session in sessions.values_mut() {
+                session.permissions = permissions;
+                if !session.permissions.controller {
+                    session.controller_active = false;
                 }
             }
         }
     }
 
+    pub fn set_client_permissions(&self, client_id: usize, permissions: InputPermissions) -> bool {
+        let mut sessions = self.sessions.lock().expect("sessões PACORD");
+        let Some(session) = sessions.get_mut(&client_id) else {
+            return false;
+        };
+        session.permissions = permissions;
+        if !permissions.controller {
+            session.controller_active = false;
+        }
+        true
+    }
+
     pub fn register(&self, nickname: String) -> usize {
+        self.register_with_permissions(nickname, self.permissions())
+    }
+
+    pub fn register_with_permissions(
+        &self,
+        nickname: String,
+        permissions: InputPermissions,
+    ) -> usize {
         let client_id = self.next_client_id.fetch_add(1, Ordering::Relaxed);
         let mut sessions = self.sessions.lock().expect("sessões PACORD");
         sessions.insert(
@@ -146,6 +169,7 @@ impl InputManager {
             InputSession {
                 client_id,
                 nickname,
+                permissions,
                 devices: None,
                 x: 0.5,
                 y: 0.5,
@@ -182,7 +206,6 @@ impl InputManager {
         if self.emergency_stop.load(Ordering::Acquire) {
             return Err(InputError::EmergencyStop);
         }
-        let permissions = self.permissions();
         let mut sessions = self.sessions.lock().expect("sessões PACORD");
         let session = sessions
             .get_mut(&client_id)
@@ -190,7 +213,7 @@ impl InputManager {
 
         match &event {
             InputEventPacket::Key { code, value } => {
-                if !permissions.keyboard {
+                if !session.permissions.keyboard {
                     return Err(InputError::PermissionDenied("teclado"));
                 }
                 if *code > 767 || !matches!(value, 0 | 1 | 2) {
@@ -198,7 +221,7 @@ impl InputManager {
                 }
             }
             InputEventPacket::PointerMotion { dx, dy } => {
-                if !permissions.pointer {
+                if !session.permissions.pointer {
                     return Err(InputError::PermissionDenied("mouse"));
                 }
                 if dx.abs() > 4096 || dy.abs() > 4096 {
@@ -208,7 +231,7 @@ impl InputManager {
                 session.y = (session.y + *dy as f32 / 1080.0).clamp(0.0, 1.0);
             }
             InputEventPacket::PointerPosition { x, y } => {
-                if !permissions.pointer {
+                if !session.permissions.pointer {
                     return Err(InputError::PermissionDenied("mouse"));
                 }
                 if !(0.0..=1.0).contains(x) || !(0.0..=1.0).contains(y) {
@@ -218,7 +241,7 @@ impl InputManager {
                 session.y = *y;
             }
             InputEventPacket::PointerButton { code, value } => {
-                if !permissions.pointer {
+                if !session.permissions.pointer {
                     return Err(InputError::PermissionDenied("mouse"));
                 }
                 if *code > 0x14a || !matches!(value, 0 | 1 | 2) {
@@ -226,7 +249,7 @@ impl InputManager {
                 }
             }
             InputEventPacket::PointerWheel { value } => {
-                if !permissions.pointer {
+                if !session.permissions.pointer {
                     return Err(InputError::PermissionDenied("mouse"));
                 }
                 if value.abs() > 120 {
@@ -234,7 +257,7 @@ impl InputManager {
                 }
             }
             InputEventPacket::GamepadButton { code, value } => {
-                if !permissions.controller {
+                if !session.permissions.controller {
                     return Err(InputError::PermissionDenied("controle"));
                 }
                 if *code > 0x2ff || !matches!(value, 0 | 1 | 2) {
@@ -243,7 +266,7 @@ impl InputManager {
                 session.controller_active = true;
             }
             InputEventPacket::GamepadAxis { value, .. } => {
-                if !permissions.controller {
+                if !session.permissions.controller {
                     return Err(InputError::PermissionDenied("controle"));
                 }
                 if !(-32768..=32767).contains(value) {
@@ -252,7 +275,7 @@ impl InputManager {
                 session.controller_active = true;
             }
             InputEventPacket::ControllerPresence { active } => {
-                if !permissions.controller {
+                if !session.permissions.controller {
                     return Err(InputError::PermissionDenied("controle"));
                 }
                 session.controller_active = *active;
@@ -320,6 +343,19 @@ mod tests {
             super::InputError::PermissionDenied("mouse")
         ));
         assert!(manager.overlays()[0].nickname == "alice");
+    }
+
+    #[test]
+    fn per_client_permissions_override_global_policy() {
+        let manager = InputManager::new(InputPermissions::all());
+        let client = manager.register_with_permissions("alice".into(), InputPermissions::none());
+        let error = manager
+            .handle_event(client, InputEventPacket::PointerMotion { dx: 1, dy: 1 })
+            .expect_err("mouse individual deveria ser bloqueado");
+        assert!(matches!(
+            error,
+            super::InputError::PermissionDenied("mouse")
+        ));
     }
 
     #[test]

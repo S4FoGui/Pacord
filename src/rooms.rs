@@ -163,6 +163,18 @@ impl RoomAdmission {
                 && participant_address_matches(&participant.address, peer)
         })
     }
+
+    pub fn permissions_for(&self, nickname: &str, peer: SocketAddr) -> Option<InputPermissions> {
+        self.participants.iter().find_map(|participant| {
+            (participant.nickname == nickname
+                && matches!(
+                    participant.state,
+                    ParticipantState::Approved | ParticipantState::Connected
+                )
+                && participant_address_matches(&participant.address, peer))
+            .then_some(participant.permissions)
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

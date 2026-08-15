@@ -16,6 +16,7 @@ fn permissions_from_environment() -> InputPermissions {
             "keyboard" => permissions.keyboard = true,
             "mouse" | "pointer" => permissions.pointer = true,
             "controller" | "gamepad" => permissions.controller = true,
+            "voice" | "audio" => permissions.voice = true,
             "" => {}
             unknown => eprintln!("permissão PACORD desconhecida, ignorada: {unknown}"),
         }
