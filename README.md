@@ -322,3 +322,24 @@ A implementação foi formatada com `cargo fmt`, compilada com `cargo check` e v
 [14] [PipeWire — official documentation](https://docs.pipewire.org/)
 
 [15] [ZeroTier — official documentation](https://docs.zerotier.com/)
+
+
+## Identidade visual e ícones personalizados
+
+O PACORD agora possui um símbolo próprio em preto e branco, criado para representar colaboração remota consentida: cursores compartilhados no centro de uma rede com participantes conectados. O conjunto foi exportado em dez tamanhos PNG compatíveis com o tema `hicolor` do KDE Plasma, de `16x16` a `512x512`, sem depender do ícone genérico `network-workgroup`.
+
+Os arquivos estão em `assets/icons/hicolor/<tamanho>/apps/org.pacord.PACORD.png`, e o mestre transparente está em `assets/pacord-icon-master.png`. O arquivo desktop usa `Icon=org.pacord.PACORD`, permitindo que o KDE encontre automaticamente o tamanho adequado no lançador, no menu e na lista de janelas.
+
+Para instalar localmente os ícones e o arquivo desktop sem privilégios de root, execute:
+
+```bash
+./packaging/install-icons.sh
+```
+
+Se for necessário reconstruir os tamanhos depois de substituir o mestre, use:
+
+```bash
+python3 tools/build_icons.py
+```
+
+O desenho mantém a identidade preto e branco do aplicativo e não contém texto incorporado, para permanecer reconhecível em tamanhos pequenos e não depender de uma fonte específica do sistema.
